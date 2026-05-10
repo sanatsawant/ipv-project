@@ -3,149 +3,244 @@ import numpy as np
 import matplotlib.pyplot as plt
 import os
 
-def restore_document(image_path, show_steps=True):
+
+# =========================================================
+# Core Restoration Pipeline (Fully Parameterized)
+# =========================================================
+
+def restore_document(image_path, show_steps=True, params=None):
     """
-    Enhanced document restoration pipeline with improved clarity.
-    
-    Improvements over basic version:
-    - Better noise reduction with bilateral filtering
-    - Adaptive thresholding for uneven lighting
-    - Larger, optimized kernel sizes
-    - Sharpening for crisper text
-    - Background normalization
-    - More robust morphological operations
+    Enhanced document restoration pipeline.
+    All parameters are tunable via the `params` dict.
     """
-    
+    default_params = {
+        # Background normalization
+        "normalize_background": True,
+        "norm_kernel_size": 15,
+
+        # Noise reduction
+        "denoise_method": "bilateral",       # "bilateral", "median", "nlmeans", "gaussian", "none"
+        "bilateral_d": 9,
+        "bilateral_sigma_color": 75,
+        "bilateral_sigma_space": 75,
+        "median_ksize": 5,
+        "nlmeans_h": 10,
+        "gaussian_ksize": 5,
+
+        # Contrast enhancement
+        "contrast_method": "clahe",          # "clahe", "hist_eq", "gamma", "none"
+        "clahe_clip_limit": 3.0,
+        "clahe_tile_size": 8,
+        "gamma": 1.0,
+
+        # Sharpening
+        "sharpen": True,
+        "sharpen_strength": 1.5,             # 1.0 = no change, >1 = sharper
+        "sharpen_blur_sigma": 3.0,
+
+        # Thresholding
+        "threshold_method": "adaptive",      # "adaptive", "otsu", "combined", "sauvola", "none"
+        "adaptive_block_size": 15,
+        "adaptive_C": 10,
+
+        # Morphological ops
+        "morph_open": True,
+        "morph_open_ksize": 2,
+        "morph_close": True,
+        "morph_close_ksize": 3,
+        "morph_dilate": False,
+        "morph_dilate_ksize": 2,
+        "morph_erode": False,
+        "morph_erode_ksize": 2,
+
+        # Extra features
+        "deskew": False,
+        "remove_borders": False,
+        "border_size": 10,
+        "invert_output": False,
+        "color_mode": "grayscale",            # "grayscale", "color"
+        "brightness": 0,                      # -100 to +100
+        "edge_enhance": False,
+    }
+
+    if params:
+        default_params.update(params)
+    p = default_params
+
     # ---------------------------------------------------------
-    # Step 1: Read Image
+    # Step 1: Load Image
     # ---------------------------------------------------------
-    original_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    
-    if original_img is None:
-        print(f"Error: Could not load image at {image_path}")
-        return None
-    
+    if p["color_mode"] == "color":
+        original_img = cv2.imread(image_path)
+        if original_img is None:
+            print(f"Error: Could not load image at {image_path}")
+            return None
+        work_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(work_img)
+        img = l
+    else:
+        original_img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        if original_img is None:
+            print(f"Error: Could not load image at {image_path}")
+            return None
+        img = original_img.copy()
+
     print(f"Image loaded: {original_img.shape}")
-    
+
     # ---------------------------------------------------------
-    # Step 2: Background Normalization
+    # Step 2: Deskew
     # ---------------------------------------------------------
-    # Remove uneven illumination and background variations
-    # This is crucial for documents with shadows or yellowing
-    background = cv2.morphologyEx(original_img, cv2.MORPH_DILATE, 
-                                   np.ones((15, 15), np.uint8))
-    normalized_img = cv2.divide(original_img, background, scale=255)
-    
+    if p["deskew"]:
+        img = _deskew(img)
+
     # ---------------------------------------------------------
-    # Step 3: Advanced Noise Reduction
+    # Step 3: Background Normalization
     # ---------------------------------------------------------
-    # Bilateral filter preserves edges while removing noise
-    # Better than median filter for text documents
-    denoised_img = cv2.bilateralFilter(normalized_img, d=9, 
-                                        sigmaColor=75, sigmaSpace=75)
-    
-    # Additional median filter for salt-and-pepper noise
-    denoised_img = cv2.medianBlur(denoised_img, 5)  # Increased from 3 to 5
-    
+    if p["normalize_background"]:
+        ks = int(p["norm_kernel_size"])
+        if ks % 2 == 0:
+            ks += 1
+        background = cv2.morphologyEx(img, cv2.MORPH_DILATE,
+                                      np.ones((ks, ks), np.uint8))
+        img = cv2.divide(img, background, scale=255)
+
     # ---------------------------------------------------------
-    # Step 4: Contrast Enhancement
+    # Step 4: Brightness Adjustment
     # ---------------------------------------------------------
-    # CLAHE with optimized parameters
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    enhanced_img = clahe.apply(denoised_img)
-    
+    if p["brightness"] != 0:
+        img = np.clip(img.astype(np.int32) + int(p["brightness"]), 0, 255).astype(np.uint8)
+
     # ---------------------------------------------------------
-    # Step 5: Sharpening
+    # Step 5: Noise Reduction
     # ---------------------------------------------------------
-    # Unsharp masking to make text crisper
-    gaussian_blur = cv2.GaussianBlur(enhanced_img, (0, 0), 3.0)
-    sharpened_img = cv2.addWeighted(enhanced_img, 1.5, gaussian_blur, -0.5, 0)
-    
+    method = p["denoise_method"]
+    if method == "bilateral":
+        img = cv2.bilateralFilter(img,
+                                   d=int(p["bilateral_d"]),
+                                   sigmaColor=p["bilateral_sigma_color"],
+                                   sigmaSpace=p["bilateral_sigma_space"])
+    elif method == "median":
+        ks = int(p["median_ksize"])
+        if ks % 2 == 0:
+            ks += 1
+        img = cv2.medianBlur(img, ks)
+    elif method == "nlmeans":
+        img = cv2.fastNlMeansDenoising(img, h=p["nlmeans_h"])
+    elif method == "gaussian":
+        ks = int(p["gaussian_ksize"])
+        if ks % 2 == 0:
+            ks += 1
+        img = cv2.GaussianBlur(img, (ks, ks), 0)
+    # "none" → skip
+
     # ---------------------------------------------------------
-    # Step 6: Adaptive Thresholding
+    # Step 6: Contrast Enhancement
     # ---------------------------------------------------------
-    # Better than Otsu's for documents with uneven lighting
-    # Using both methods and combining them
-    
-    # Method 1: Adaptive Gaussian Thresholding
-    adaptive_thresh = cv2.adaptiveThreshold(
-        sharpened_img, 255, 
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY, 
-        blockSize=15,  # Size of pixel neighborhood
-        C=10  # Constant subtracted from mean
-    )
-    
-    # Method 2: Otsu's thresholding (for comparison)
-    _, otsu_thresh = cv2.threshold(sharpened_img, 0, 255, 
+    cm = p["contrast_method"]
+    if cm == "clahe":
+        clahe = cv2.createCLAHE(clipLimit=p["clahe_clip_limit"],
+                                  tileGridSize=(int(p["clahe_tile_size"]),
+                                                int(p["clahe_tile_size"])))
+        img = clahe.apply(img)
+    elif cm == "hist_eq":
+        img = cv2.equalizeHist(img)
+    elif cm == "gamma":
+        gamma = max(0.1, p["gamma"])
+        lut = np.array([((i / 255.0) ** (1.0 / gamma)) * 255
+                        for i in range(256)], dtype=np.uint8)
+        img = cv2.LUT(img, lut)
+    # "none" → skip
+
+    # ---------------------------------------------------------
+    # Step 7: Sharpening
+    # ---------------------------------------------------------
+    if p["sharpen"]:
+        strength = p["sharpen_strength"]
+        gaussian_blur = cv2.GaussianBlur(img, (0, 0), p["sharpen_blur_sigma"])
+        img = cv2.addWeighted(img, strength, gaussian_blur, -(strength - 1.0), 0)
+        img = np.clip(img, 0, 255).astype(np.uint8)
+
+    # ---------------------------------------------------------
+    # Step 8: Edge Enhancement
+    # ---------------------------------------------------------
+    if p["edge_enhance"]:
+        laplacian = cv2.Laplacian(img, cv2.CV_64F)
+        laplacian = np.clip(np.abs(laplacian), 0, 255).astype(np.uint8)
+        img = cv2.addWeighted(img, 1.0, laplacian, 0.5, 0)
+
+    # ---------------------------------------------------------
+    # Step 9: Thresholding
+    # ---------------------------------------------------------
+    tm = p["threshold_method"]
+    if tm != "none":
+        bs = int(p["adaptive_block_size"])
+        if bs % 2 == 0:
+            bs += 1
+        if bs < 3:
+            bs = 3
+
+        if tm == "adaptive":
+            img = cv2.adaptiveThreshold(img, 255,
+                                         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                         cv2.THRESH_BINARY, bs, int(p["adaptive_C"]))
+        elif tm == "otsu":
+            _, img = cv2.threshold(img, 0, 255,
                                     cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # Combine both methods (taking the intersection gives best results)
-    combined_thresh = cv2.bitwise_and(adaptive_thresh, otsu_thresh)
-    
+        elif tm == "combined":
+            adaptive = cv2.adaptiveThreshold(img, 255,
+                                              cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                              cv2.THRESH_BINARY, bs, int(p["adaptive_C"]))
+            _, otsu = cv2.threshold(img, 0, 255,
+                                     cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            img = cv2.bitwise_and(adaptive, otsu)
+        elif tm == "sauvola":
+            img = _sauvola_threshold(img, window_size=bs)
+    # "none" → no binarization
+
     # ---------------------------------------------------------
-    # Step 7: Morphological Operations
+    # Step 10: Morphological Operations
     # ---------------------------------------------------------
-    # Remove small noise spots
-    kernel_opening = np.ones((2, 2), np.uint8)
-    cleaned_img = cv2.morphologyEx(combined_thresh, cv2.MORPH_OPEN, kernel_opening)
-    
-    # Fill gaps in text (closing operation)
-    kernel_closing = np.ones((3, 3), np.uint8)  # Increased from 2x2
-    final_output = cv2.morphologyEx(cleaned_img, cv2.MORPH_CLOSE, kernel_closing)
-    
+    if p["morph_open"]:
+        ks = int(p["morph_open_ksize"])
+        kernel = np.ones((ks, ks), np.uint8)
+        img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
+
+    if p["morph_close"]:
+        ks = int(p["morph_close_ksize"])
+        kernel = np.ones((ks, ks), np.uint8)
+        img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, kernel)
+
+    if p["morph_dilate"]:
+        ks = int(p["morph_dilate_ksize"])
+        kernel = np.ones((ks, ks), np.uint8)
+        img = cv2.dilate(img, kernel, iterations=1)
+
+    if p["morph_erode"]:
+        ks = int(p["morph_erode_ksize"])
+        kernel = np.ones((ks, ks), np.uint8)
+        img = cv2.erode(img, kernel, iterations=1)
+
     # ---------------------------------------------------------
-    # Step 8: Final Enhancement (Optional)
+    # Step 11: Remove Borders
     # ---------------------------------------------------------
-    # Slight dilation to make text bolder if needed
-    # kernel_dilate = np.ones((2, 2), np.uint8)
-    # final_output = cv2.dilate(final_output, kernel_dilate, iterations=1)
-    
+    if p["remove_borders"]:
+        bs = int(p["border_size"])
+        img = img[bs:-bs, bs:-bs] if img.shape[0] > 2 * bs and img.shape[1] > 2 * bs else img
+
     # ---------------------------------------------------------
-    # Visualization
+    # Step 12: Invert
     # ---------------------------------------------------------
-    if show_steps:
-        titles = [
-            '1. Original Image', 
-            '2. Normalized Background',
-            '3. Denoised (Bilateral + Median)', 
-            '4. Enhanced Contrast (CLAHE)',
-            '5. Sharpened',
-            '6. Adaptive Threshold',
-            '7. Otsu Threshold',
-            '8. Combined Threshold',
-            '9. Final Output (Morphology)'
-        ]
-        
-        images = [
-            original_img, 
-            normalized_img,
-            denoised_img, 
-            enhanced_img,
-            sharpened_img,
-            adaptive_thresh,
-            otsu_thresh,
-            combined_thresh,
-            final_output
-        ]
-        
-        plt.figure(figsize=(20, 12))
-        for i in range(9):
-            plt.subplot(3, 3, i + 1)
-            plt.imshow(images[i], cmap='gray', vmin=0, vmax=255)
-            plt.title(titles[i], fontsize=11, fontweight='bold')
-            plt.axis('off')
-        
-        plt.tight_layout()
-        
-        # Save in the same directory as the input image (cross-platform)
-        base_path = os.path.splitext(image_path)[0]
-        steps_path = f"{base_path}_restoration_steps.png"
-        plt.savefig(steps_path, dpi=150, bbox_inches='tight')
-        print(f"Restoration steps saved to: {steps_path}")
-        
-        plt.show()
-    
+    if p["invert_output"]:
+        img = cv2.bitwise_not(img)
+
+    # ---------------------------------------------------------
+    # Step 13: Merge back to color if needed
+    # ---------------------------------------------------------
+    final_output = img
+    if p["color_mode"] == "color":
+        merged = cv2.merge([img, a, b])
+        final_output = cv2.cvtColor(merged, cv2.COLOR_LAB2BGR)
+
     # ---------------------------------------------------------
     # Save Output
     # ---------------------------------------------------------
@@ -153,59 +248,61 @@ def restore_document(image_path, show_steps=True):
     output_path = f"{base_path}_restored.png"
     cv2.imwrite(output_path, final_output)
     print(f"Restored image saved to: {output_path}")
-    
+
     return final_output
 
 
+# =========================================================
+# Helpers
+# =========================================================
+
+def _deskew(img):
+    """Deskew a grayscale image using moments."""
+    coords = np.column_stack(np.where(img < 128))
+    if coords.shape[0] < 10:
+        return img
+    angle = cv2.minAreaRect(coords)[-1]
+    if angle < -45:
+        angle = -(90 + angle)
+    else:
+        angle = -angle
+    (h, w) = img.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(img, M, (w, h),
+                              flags=cv2.INTER_CUBIC,
+                              borderMode=cv2.BORDER_REPLICATE)
+    return rotated
+
+
+def _sauvola_threshold(img, window_size=15, k=0.2, R=128):
+    """Sauvola local thresholding — excellent for degraded documents."""
+    img_float = img.astype(np.float64)
+    mean = cv2.boxFilter(img_float, cv2.CV_64F, (window_size, window_size))
+    mean_sq = cv2.boxFilter(img_float ** 2, cv2.CV_64F, (window_size, window_size))
+    std = np.sqrt(mean_sq - mean ** 2)
+    threshold = mean * (1 + k * (std / R - 1))
+    binary = np.where(img_float >= threshold, 255, 0).astype(np.uint8)
+    return binary
+
+
 def restore_document_simple(image_path):
-    """
-    Simplified version with just the best settings for quick processing.
-    """
-    img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
-    
-    if img is None:
-        print(f"Error: Could not load image at {image_path}")
-        return None
-    
-    # Background normalization
-    background = cv2.morphologyEx(img, cv2.MORPH_DILATE, np.ones((15, 15), np.uint8))
-    img = cv2.divide(img, background, scale=255)
-    
-    # Denoise
-    img = cv2.bilateralFilter(img, 9, 75, 75)
-    img = cv2.medianBlur(img, 5)
-    
-    # Enhance contrast
-    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
-    img = clahe.apply(img)
-    
-    # Sharpen
-    blur = cv2.GaussianBlur(img, (0, 0), 3.0)
-    img = cv2.addWeighted(img, 1.5, blur, -0.5, 0)
-    
-    # Threshold
-    img = cv2.adaptiveThreshold(img, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-                                cv2.THRESH_BINARY, 15, 10)
-    
-    # Clean up
-    kernel = np.ones((2, 2), np.uint8)
-    img = cv2.morphologyEx(img, cv2.MORPH_OPEN, kernel)
-    img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    
-    base_path = os.path.splitext(image_path)[0]
-    output_path = f"{base_path}_restored.png"
-    cv2.imwrite(output_path, img)
-    print(f"Restored image saved to: {output_path}")
-    
-    return img
+    """Quick simplified pipeline with defaults."""
+    return restore_document(image_path, show_steps=False)
+
+
+def get_image_histogram(img_bgr_or_gray):
+    """Return histogram data as a list of (bin_center, count) tuples."""
+    if len(img_bgr_or_gray.shape) == 3:
+        gray = cv2.cvtColor(img_bgr_or_gray, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img_bgr_or_gray
+    hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+    return hist.flatten().tolist()
 
 
 # =========================================================
 # Execution
 # =========================================================
 if __name__ == "__main__":
-    # Full pipeline with visualization
     restore_document('sample_document.jpg', show_steps=True)
-    
-    # Or use simplified version
-    # restore_document_simple('sample_document.jpg')

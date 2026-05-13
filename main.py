@@ -2,9 +2,13 @@ import cv2
 import numpy as np
 import os
 import difflib
+import sys
 import pytesseract
-pytesseract.pytesseract.tesseract_cmd = r"C:\Users\sanat\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
 
+# Use the specific path on your local Windows machine
+if sys.platform == "win32":
+    pytesseract.pytesseract.tesseract_cmd = r"C:\Users\sanat\AppData\Local\Programs\Tesseract-OCR\tesseract.exe"
+# On Linux (deployment), pytesseract will automatically find the system installation
 # =========================================================
 # Tesseract Check
 # =========================================================
